@@ -5660,10 +5660,15 @@ GenTreePtr          Compiler::fgMorphField(GenTreePtr tree, MorphAddrContext* ma
         /// This is left here to point out how to implement it.
 #define CONSERVATIVE_NULL_CHECK_BYREF_CREATION 1
 
+        CORINFO_CLASS_HANDLE fieldClass;
+        bool fieldTypeIsValueClassWithOnlyZeroOffsetFields = 
+             info.compCompHnd->getFieldType(symHnd, &fieldClass) == CORINFO_TYPE_VALUECLASS &&
+             info.compCompHnd->getClassSize(fieldClass) == 1;
+
         // If the objRef is a GT_ADDR node, it, itself, never requires null checking.  The expression
         // whose address is being taken is either a local or static variable, whose address is necessarily
         // non-null, or else it is a field dereference, which will do its own bounds checking if necessary.
-        if (objRef->gtOper != GT_ADDR
+        if (objRef->gtOper != GT_ADDR && !fieldTypeIsValueClassWithOnlyZeroOffsetFields
             && ((mac->m_kind == MACK_Addr || mac->m_kind == MACK_Ind)
                 && (!mac->m_allConstantOffsets
                     || fgIsBigOffset(mac->m_totalOffset + fldOffset)
