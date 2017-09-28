@@ -1509,6 +1509,7 @@ BEGIN
     IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_IMPLICIT_IMPLEMENTATION "Method '%3' on type '%1' from assembly '%2' tried to implicitly implement an interface method with weaker type parameter constraints."
     IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_LOCAL_METHOD_IMPL "Method '%3' on type '%1' from assembly '%2' tried to explicitly implement a local method with weaker type parameter constraints."
     IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_PARENT_METHOD_IMPL "Method '%3' on type '%1' from assembly '%2' tried to explicitly implement a parent method with weaker type parameter constraints."
+    IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_EXISTING_IMPL "Method '%3' on type '%1' from assembly '%2' tried to explicitly implement a parent method already implemented by a method with weaker type parameter constraints."
     IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_INTERFACE_METHOD_IMPL "Method '%3' on type '%1' from assembly '%2' tried to explicitly implement an interface method with weaker type parameter constraints."
     IDS_CLASSLOAD_EXPLICIT_GENERIC "Could not load type '%1' from assembly '%2' because generic types cannot have explicit layout."
     IDS_EE_CONFIGPARSER_ERROR_CAPTION   "Configuration parser error"

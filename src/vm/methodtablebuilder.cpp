@@ -313,36 +313,6 @@ MethodTableBuilder::LoaderFindMethodInParentClass(
     }
 //#endif
 
-//@TODO: Move to this code, as the use of a HashTable is broken; overriding semantics
-//@TODO: require matching against the most-derived slot of a given name and signature,
-//@TODO: (which deals specifically with newslot methods with identical name and sig), but
-//@TODO: HashTables are by definition unordered and so we've only been getting by with the
-//@TODO: implementation being compatible with the order in which methods were added to
-//@TODO: the HashTable in CreateMethodChainHash.
-#if 0 
-    bmtParentInfo::Iterator it(bmtParent->IterateSlots());
-    it.MoveTo(static_cast<size_t>(GetParentMethodTable()->GetNumVirtuals()));
-    while (it.Prev())
-    {
-        bmtMethodHandle decl(it->Decl());
-        const MethodSignature &declSig(decl.GetMethodSignature());
-        if (declSig == methodSig)
-        {
-            if (pMethodConstraintsMatch != NULL)
-            {
-                // Check the constraints are consistent,
-                // and return the result to the caller.
-                // We do this here to avoid recalculating pSubst.
-                *pMethodConstraintsMatch = MetaSig::CompareMethodConstraints(
-                    &methodSig.GetSubstitution(), methodSig.GetModule(), methodSig.GetToken(),
-                    &declSig.GetSubstitution(),  declSig.GetModule(),  declSig.GetToken());
-            }
-
-            return decl.AsRTMethod();
-        }
-    }
-#endif // 0
-
     return NULL;
 }
 
@@ -906,6 +876,21 @@ MethodTableBuilder::MethodSignature::SignaturesEquivalent(
     return !!MetaSig::CompareMethodSigs(
         sig1.GetSignature(), static_cast<DWORD>(sig1.GetSignatureLength()), sig1.GetModule(), &sig1.GetSubstitution(), 
         sig2.GetSignature(), static_cast<DWORD>(sig2.GetSignatureLength()), sig2.GetModule(), &sig2.GetSubstitution());
+}
+
+//*******************************************************************************
+/*static*/ bool
+MethodTableBuilder::MethodSignature::SignaturesVariant(
+    const MethodSignature & sig1,
+    const MethodSignature & sig2)
+{
+    STANDARD_VM_CONTRACT;
+
+    TokenPairList newVisited = TokenPairList::AdjustForVariantScope(NULL);
+    return !!MetaSig::CompareMethodSigs(
+        sig1.GetSignature(), static_cast<DWORD>(sig1.GetSignatureLength()), sig1.GetModule(), &sig1.GetSubstitution(),
+        sig2.GetSignature(), static_cast<DWORD>(sig2.GetSignatureLength()), sig2.GetModule(), &sig2.GetSubstitution(),
+        &newVisited);
 }
 
 //*******************************************************************************
@@ -2349,6 +2334,11 @@ MethodTableBuilder::EnumerateMethodImpls()
                 {
                     BuildMethodTableThrowException(IDS_CLASSLOAD_MI_MISSING_SIG_BODY);
                 }
+
+                // this allows a .override to have a variant signature from it's enclosing method
+                TokenPairList newVisitedVariantScope =
+                    TokenPairList::AdjustForVariantScope(NULL);
+
                 // Can't use memcmp because there may be two AssemblyRefs
                 // in this scope, pointing to the same assembly, etc.).
                 if (!MetaSig::CompareMethodSigs(
@@ -2359,7 +2349,8 @@ MethodTableBuilder::EnumerateMethodImpls()
                         pSigBody,
                         cbSigBody,
                         GetModule(),
-                        NULL))
+                        NULL,
+                        &newVisitedVariantScope))
                 {
                     BuildMethodTableThrowException(IDS_CLASSLOAD_MI_BODY_DECL_MISMATCH);
                 }
@@ -6078,6 +6069,16 @@ MethodTableBuilder::AddMethodImplDispatchMapping(
     // Save the entry into the vtable as well, if it isn't an interface methodImpl
     if (typeID == DispatchMapTypeID::ThisClassID())
     {
+        bmtMethodSlot slot = (*bmtVT)[slotNumber];
+        bmtMethodHandle oldImplMethod = slot.Impl();
+        if (!oldImplMethod.IsNull()) {
+            MethodImplCompareSignatures(
+                oldImplMethod, 
+                pImplMethod, 
+                IDS_CLASSLOAD_CONSTRAINT_MISMATCH_ON_EXISTING_IMPL
+            );
+        }
+
         bmtVT->SetVirtualMethodImpl(slotNumber, pImplMethod);
     }
 } // MethodTableBuilder::AddMethodImplDispatchMapping
@@ -6100,7 +6101,7 @@ MethodTableBuilder::MethodImplCompareSignatures(
     const MethodSignature &declSig(hDecl.GetMethodSignature());
     const MethodSignature &implSig(hImpl.GetMethodSignature());
 
-    if (!MethodSignature::SignaturesEquivalent(declSig, implSig))
+    if (!MethodSignature::SignaturesVariant(declSig, implSig))
     {
         LOG((LF_CLASSLOADER, LL_INFO1000, "BADSIG placing MethodImpl: %x\n", declSig.GetToken()));
         BuildMethodTableThrowException(COR_E_TYPELOAD, IDS_CLASSLOAD_MI_BADSIGNATURE, declSig.GetToken());

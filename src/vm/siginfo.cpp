@@ -3444,8 +3444,176 @@ BOOL CompareTypeDefsForEquivalence(mdToken tk1, mdToken tk2, Module *pModule1, M
 #endif //!defined(DACCESS_COMPILE) && defined(FEATURE_COMINTEROP)
 }
 
+BOOL CompareTypeDefsOrRefsOrSpecsForVariance(
+    mdToken              tk1,
+    mdToken              tk2,
+    Module *             pModule1,
+    Module *             pModule2,
+    TokenPairList *      pVisited) // = NULL
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(TypeFromToken(tk1) == mdtTypeDef);
+        PRECONDITION(
+            TypeFromToken(tk2) == mdtTypeDef ||
+            TypeFromToken(tk2) == mdtTypeRef ||
+            TypeFromToken(tk2) == mdtTypeSpec
+        );
+    }
+    CONTRACTL_END
 
-BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModule2, TokenPairList *pVisited /*= NULL*/)
+    if (TypeFromToken(tk2) != mdtTypeSpec) 
+        return CompareTypeTokens(tk1, tk2, pModule1, pModule2, pVisited);
+    
+    IMDInternalImport* pMdImport = pModule2->GetMDImport();
+    PCCOR_SIGNATURE pSig1 = NULL;
+    PCCOR_SIGNATURE pEndSig1 = NULL;
+    const Substitution* pSubst1 = NULL;
+    const Substitution* pSubst2 = NULL;
+
+    TokenPairList::Deconstruct(pVisited, &pSig1, &pEndSig1, &pSubst1, &pSubst2);
+    CONSISTENCY_CHECK(pSig1 != NULL && pEndSig1 != NULL);
+
+    PCCOR_SIGNATURE pSig2;
+    ULONG cSig2;
+    IfFailThrow(pMdImport->GetTypeSpecFromToken(tk2, &pSig2, &cSig2));
+    PCCOR_SIGNATURE pEndSig2 = pSig2 + cSig2;
+
+    // recurse
+    return MetaSig::CompareElementType(
+        pSig1, pSig2,
+        pEndSig1, pEndSig2,
+        pModule1, pModule2,
+        pSubst1, pSubst2,
+        pVisited);
+}
+
+BOOL IsRefLikeTypeDefOrRef(
+    mdToken *pTk,
+    Module **ppModule)
+{
+    CONTRACT(BOOL)
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(
+            TypeFromToken(*pTk) == mdtTypeDef ||
+            TypeFromToken(*pTk) == mdtTypeRef
+        );
+        POSTCONDITION(TypeFromToken(*pTk) == mdtTypeDef);
+    }
+    CONTRACT_END;
+
+    if (TypeFromToken(*pTk) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(*ppModule, *pTk, ppModule, pTk));
+    _ASSERTE(TypeFromToken(*pTk) == mdtTypeDef);
+
+    if (CompareTypeTokens(
+        g_pValueTypeClass->GetCl(), *pTk,
+        MscorlibBinder::GetModule(), *ppModule, NULL))
+        RETURN FALSE;
+
+    if (CompareTypeTokens(
+        g_pEnumClass->GetCl(), *pTk,
+        MscorlibBinder::GetModule(), *ppModule, NULL))
+        RETURN FALSE;
+
+    RETURN TRUE;
+}
+
+BOOL CompareTypeDefsForVariance(
+    mdToken              tk1,
+    mdToken              tk2,
+    Module *             pModule1,
+    Module *             pModule2,
+    TokenPairList *      pVisited) // = NULL
+{
+#ifdef DACCESS_COMPILE
+    // We shouldn't execute this code in dac builds.
+    _ASSERTE(FALSE);
+#endif
+
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(TypeFromToken(tk1) == mdtTypeDef);
+        PRECONDITION(TypeFromToken(tk2) == mdtTypeDef);
+    }
+    CONTRACTL_END
+
+    if (pModule1 != pModule2)
+        return FALSE;
+
+    if (tk1 == tk2)
+        return TRUE;
+
+    if (TokenPairList::InVariantScope(pVisited))
+    {
+        DWORD dwAttr;
+
+        while (!IsNilToken(tk2))
+        {
+            IMDInternalImport* pMdImport = pModule2->GetMDImport();
+
+            mdToken tkParent;
+            IfFailThrow(pMdImport->GetTypeDefProps(tk2, &dwAttr, &tkParent));
+
+            BOOL hasParent = !IsNilToken(tkParent);
+            BOOL isRefLikeType = !hasParent;
+
+            Module* pParentModule = pModule2;
+            if (hasParent) {
+
+                if (CompareTypeDefsOrRefsOrSpecsForVariance(tk1, tkParent, pModule1, pParentModule, pVisited))
+                    return TRUE;
+
+                if (TypeFromToken(tkParent) == mdtTypeSpec)
+                    return FALSE;
+                
+                isRefLikeType = IsRefLikeTypeDefOrRef(&tkParent, &pParentModule);
+            }
+
+            // compare interfaces
+            if (isRefLikeType)
+            {
+                HENUMInternalHolder hEnumInterfaceImpl(pMdImport);
+                hEnumInterfaceImpl.EnumInit(mdtInterfaceImpl, tk2);
+
+                mdInterfaceImpl tkInerfaceImpl;
+                while (pMdImport->EnumNext(&hEnumInterfaceImpl, &tkInerfaceImpl))
+                {
+                    mdTypeRef tkInterface;
+                    IfFailThrow(pMdImport->GetTypeOfInterfaceImpl(tkInerfaceImpl, &tkInterface));
+
+                    if (CompareTypeDefsOrRefsOrSpecsForVariance(tk1, tkInterface, pModule1, pModule2, pVisited))
+                        return TRUE;
+                }
+            }
+
+            // try base type
+            tk2 = tkParent;
+            pModule2 = pParentModule;
+        }
+    }
+
+    return FALSE;
+}
+
+BOOL CompareTypeTokens(
+    mdToken tk1,
+    mdToken tk2,
+    Module *pModule1,
+    Module *pModule2,
+    TokenPairList *pVisited /*= NULL*/)
 {
     CONTRACTL
     {
@@ -3501,8 +3669,12 @@ BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModu
             // equivalent types (equivalence based on GUID and TypeIdentifierAttribute)
             return CompareTypeDefsForEquivalence(tk1, tk2, pModule1, pModule2, pVisited);
 #else // FEATURE_TYPEEQUIVALENCE
-            // two type defs can't be the same unless they are identical
-            return FALSE;
+            // two type defs can't be the same unless they are identical, but they might be variants
+            return CompareTypeDefsForVariance(
+                tk1, tk2,
+                pModule1, pModule2,
+                pVisited
+            );
 #endif // FEATURE_TYPEEQUIVALENCE
         }
         IfFailGo(pInternalImport1->GetNameOfTypeDef(tk1, &pszName1, &pszNamespace1));
@@ -3532,69 +3704,6 @@ BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModu
     {
         return FALSE;
     }
-    
-    //////////////////////////////////////////////////////////////////////
-    // OK names pass, see if it is nested, and if so that the nested classes are the same
-    
-    enclosingTypeTk1 = mdTokenNil;
-    if (TypeFromToken(tk1) == mdtTypeRef)
-    {
-        IfFailGo(pInternalImport1->GetResolutionScopeOfTypeRef(tk1, &enclosingTypeTk1));
-        if (enclosingTypeTk1 == mdTypeRefNil)
-        {
-            enclosingTypeTk1 = mdTokenNil;
-        }
-    }
-    else
-    {
-        if (FAILED(hr = pInternalImport1->GetNestedClassProps(tk1, &enclosingTypeTk1)))
-        {
-            if (hr != CLDB_E_RECORD_NOTFOUND)
-            {
-                IfFailGo(hr);
-            }
-            enclosingTypeTk1 = mdTokenNil;
-        }
-    }
-    
-    enclosingTypeTk2 = mdTokenNil;
-    if (TypeFromToken(tk2) == mdtTypeRef)
-    {
-        IfFailGo(pInternalImport2->GetResolutionScopeOfTypeRef(tk2, &enclosingTypeTk2));
-        if (enclosingTypeTk2 == mdTypeRefNil)
-        {
-            enclosingTypeTk2 = mdTokenNil;
-        }
-    }
-    else
-    {
-        if (FAILED(hr = pInternalImport2->GetNestedClassProps(tk2, &enclosingTypeTk2)))
-        {
-            if (hr != CLDB_E_RECORD_NOTFOUND)
-            {
-                IfFailGo(hr);
-            }
-            enclosingTypeTk2 = mdTokenNil;
-        }
-    }
-    
-    if (TypeFromToken(enclosingTypeTk1) == mdtTypeRef || TypeFromToken(enclosingTypeTk1) == mdtTypeDef)
-    {
-        if (!CompareTypeTokens(enclosingTypeTk1, enclosingTypeTk2, pModule1, pModule2, pVisited))
-            return FALSE;
-
-        // TODO: We could return TRUE if we knew that type equivalence was not exercised during the previous call.
-    }
-    else
-    {
-        // Check if tk1 is non-nested, but tk2 is nested
-        if (TypeFromToken(enclosingTypeTk2) == mdtTypeRef || TypeFromToken(enclosingTypeTk2) == mdtTypeDef)
-            return FALSE;
-    }
-    
-    //////////////////////////////////////////////////////////////////////
-    // OK, we have non-nested types or the the enclosing types are equivalent
-
     
     // Do not load the type! (Or else you may run into circular dependency loading problems.)
     Module* pFoundModule1;
@@ -3723,6 +3832,9 @@ MetaSig::CompareElementType(
             pVisited);
     }
 
+    // save frame for variant recursion
+    TokenPairList newFrameVisited = TokenPairList(pSig1, pEndSig1, pSubst1, pSubst2, pVisited);
+
     CorElementType Type1 = ELEMENT_TYPE_MAX; // initialize to illegal
     CorElementType Type2 = ELEMENT_TYPE_MAX; // initialize to illegal
 
@@ -3817,9 +3929,25 @@ MetaSig::CompareElementType(
                 }
             }
         }
-        else
+        else if (!TokenPairList::InVariantScope(pVisited))
         {
             return FALSE; // types must be the same
+        }
+
+        while (Type1 != Type2) 
+        {
+            switch (Type2)
+            {
+            case ELEMENT_TYPE_STRING:
+            case ELEMENT_TYPE_CLASS:
+            case ELEMENT_TYPE_ARRAY:
+            case ELEMENT_TYPE_SZARRAY:
+                Type2 = ELEMENT_TYPE_OBJECT;
+                break;
+
+            default:
+                return FALSE;
+            }
         }
     }
 
@@ -3973,6 +4101,8 @@ MetaSig::CompareElementType(
         
         case ELEMENT_TYPE_GENERICINST:
         {
+            pVisited = &newFrameVisited;
+
             TokenPairList newVisited = TokenPairList::AdjustForTypeSpec(
                 pVisited, 
                 pModule1, 
@@ -3981,20 +4111,23 @@ MetaSig::CompareElementType(
             TokenPairList newVisitedAlwaysForbidden = TokenPairList::AdjustForTypeEquivalenceForbiddenScope(pVisited);
 
             // Type constructors - The actual type is never permitted to participate in type equivalence.
-            if (!CompareElementType(
-                    pSig1, 
-                    pSig2, 
-                    pEndSig1, 
-                    pEndSig2, 
-                    pModule1, 
-                    pModule2, 
-                    pSubst1, 
-                    pSubst2, 
-                    &newVisitedAlwaysForbidden))
+
+            // ELEMENT_TYPE_GENERICINST must be followed by either ELEMENT_TYPE_CLASS or ELEMENT_TYPE_VALUETYPE
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig1, pEndSig1, &Type1));
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig2, pEndSig2, &Type2));
+            if ((Type1 != Type2) || (Type1 != ELEMENT_TYPE_CLASS && Type1 != ELEMENT_TYPE_VALUETYPE))
             {
                 return FALSE;
             }
             
+            mdToken tk1, tk2;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig1, pEndSig1, &tk1));
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+            if (!CompareTypeTokens(tk1, tk2, pModule1, pModule2, pVisited))
+            {
+                return FALSE;
+            }
+
             DWORD argCnt1;
             IfFailThrow(CorSigUncompressData_EndPtr(pSig1, pEndSig1, &argCnt1));
             DWORD argCnt2;
@@ -4446,22 +4579,47 @@ MetaSig::CompareMethodSigs(
         return TRUE;
     }
 
-    // do return type as well
-    for (i = 0; i <= ArgCount1; i++)
+    // if variant impl/decl check, then pSig1 is the decl and pSig2 the impl
+    // so a good match could be:
+    //  decl = pSig1 = 'object M(string a)'
+    //  impl = pSig2 = 'string M(object a)'
+
+    // check return type
+    // if variant, then ret type of pSig2 is ok so long as 
+    // it's assignable to ret type of pSig1
+    if (!CompareElementType(
+        pSig1, 
+        pSig2,
+        pEndSig1, 
+        pEndSig2,
+        pModule1, 
+        pModule2,
+        pSubst1, 
+        pSubst2,
+        pVisited))
+    {
+        return FALSE;
+    }
+
+    // check argument types
+    // if variant, then argument of pSig1 is ok so long as 
+    // it's assignable to its corrisponding argument in pSig2
+    for (i = 1; i <= ArgCount1; i++)
     {
         if (!CompareElementType(
-                pSig1, 
-                pSig2, 
-                pEndSig1, 
-                pEndSig2, 
-                pModule1, 
-                pModule2, 
-                pSubst1, 
-                pSubst2, 
-                pVisited))
+            pSig2, 
+            pSig1,
+            pEndSig2, 
+            pEndSig1,
+            pModule2, 
+            pModule1,
+            pSubst2, 
+            pSubst1,
+            pVisited))
         {
             return FALSE;
         }
+
     }
 
     return TRUE;
@@ -4791,7 +4949,8 @@ BOOL MetaSig::CompareVariableConstraints(const Substitution *pSubst1,
     HENUMInternalHolder hEnum1(pInternalImport1);
     mdGenericParamConstraint tkConstraint1;
     hEnum1.EnumInit(mdtGenericParamConstraint, tok1);
-    
+    TokenPairList newVisited = TokenPairList::AdjustForVariantScope(NULL);
+
     while (pInternalImport1->EnumNext(&hEnum1, &tkConstraint1))
     {
         mdToken tkConstraintType1, tkParam1;
@@ -4821,8 +4980,8 @@ BOOL MetaSig::CompareVariableConstraints(const Substitution *pSubst1,
                 mdToken tkConstraintType2, tkParam2;
                 IfFailThrow(pInternalImport2->GetGenericParamConstraintProps(tkConstraint2, &tkParam2, &tkConstraintType2));
                 _ASSERTE(tkParam2 == tok2);
-            
-                found = CompareTypeDefOrRefOrSpec(pModule1, tkConstraintType1, pSubst1, pModule2, tkConstraintType2, pSubst2, NULL);
+
+                found = CompareTypeDefOrRefOrSpec(pModule1, tkConstraintType1, pSubst1, pModule2, tkConstraintType2, pSubst2, &newVisited);
             }
             if (!found) 
             {
@@ -5534,6 +5693,27 @@ TokenPairList TokenPairList::AdjustForTypeEquivalenceForbiddenScope(TokenPairLis
 
     TokenPairList result(pTemplate);
     result.m_bInTypeEquivalenceForbiddenScope = TRUE;
+    return result;
+}
+
+// static
+TokenPairList TokenPairList::AdjustForVariantScope(TokenPairList *pTemplate)
+{
+    CONTRACTL
+    {
+        THROWS;
+        MODE_ANY;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END
+
+    TokenPairList result(pTemplate);
+    if (pTemplate)
+    {
+        assert(!pTemplate->m_bInVariantScope);
+    }
+
+    result.m_bInVariantScope = TRUE;
     return result;
 }
 
