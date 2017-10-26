@@ -3444,8 +3444,362 @@ BOOL CompareTypeDefsForEquivalence(mdToken tk1, mdToken tk2, Module *pModule1, M
 #endif //!defined(DACCESS_COMPILE) && defined(FEATURE_COMINTEROP)
 }
 
+BOOL 
+GetParentType(
+    mdToken tk,
+    Module *pModule,
+    mdToken *pParentTk,
+    Module **ppParentModule) {
 
-BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModule2, TokenPairList *pVisited /*= NULL*/)
+    CONTRACT(BOOL)
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(pModule != NULL);
+        PRECONDITION(
+            TypeFromToken(tk) == mdtTypeDef ||
+            TypeFromToken(tk) == mdtTypeRef
+        );
+        PRECONDITION(pParentTk != NULL);
+        PRECONDITION(ppParentModule && *ppParentModule);
+        POSTCONDITION(pParentTk != NULL);
+        POSTCONDITION(
+            TypeFromToken(*pParentTk) == mdtTypeDef ||
+            TypeFromToken(*pParentTk) == mdtTypeSpec
+        );
+        POSTCONDITION(ppParentModule != NULL);
+    }
+    CONTRACT_END
+
+    *ppParentModule = pModule;
+    *pParentTk = tk;
+
+    if (TypeFromToken(tk) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(pModule, tk, ppParentModule, pParentTk));
+
+    IMDInternalImport* pMdImport = pModule->GetMDImport();
+    IfFailThrow(pMdImport->GetTypeDefProps(*pParentTk, NULL, pParentTk));
+
+    if (IsNilToken(*pParentTk))
+        RETURN FALSE;
+
+    if (TypeFromToken(*pParentTk) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(*ppParentModule, *pParentTk, ppParentModule, pParentTk));
+
+    RETURN TRUE;
+}
+
+BOOL IsMscorlibType(
+    mdToken tk,
+    Module *pModule,
+    PTR_MethodTable pKnownType)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(pModule != NULL);
+        PRECONDITION(pKnownType != NULL);
+        PRECONDITION(
+            TypeFromToken(tk) == mdtTypeDef ||
+            TypeFromToken(tk) == mdtTypeSpec
+        );
+    }
+    CONTRACTL_END
+
+    if (TypeFromToken(tk) == mdtTypeSpec)
+        return FALSE;
+
+    if (MscorlibBinder::GetModule() != pModule)
+        return FALSE;
+
+    if (pKnownType->GetCl() != tk)
+        return FALSE;
+
+    return TRUE;
+}
+
+BOOL IsValueType(mdToken tk, Module *pModule, BOOL bIsParent = FALSE);
+
+BOOL IsValueType(
+    PCCOR_SIGNATURE pSig,
+    PCCOR_SIGNATURE pSigEnd,
+    Module *pModule,
+    CorElementType type = ELEMENT_TYPE_END)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        MODE_ANY;
+    }
+    CONTRACTL_END
+
+    if (type == ELEMENT_TYPE_END) 
+        IfFailThrow(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, &type));
+    
+    switch (type)
+    {
+        case ELEMENT_TYPE_ARRAY:
+        case ELEMENT_TYPE_SZARRAY:
+        {
+            return FALSE;
+        }
+
+        case ELEMENT_TYPE_GENERICINST:
+        {
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, &type));
+
+            if (type == ELEMENT_TYPE_VALUETYPE)
+                return TRUE;
+
+            mdToken tk;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig, pSigEnd, &tk));
+
+            return IsValueType(tk, pModule);
+        }
+
+        default:
+        {
+            THROW_BAD_FORMAT(BFA_BAD_COMPLUS_SIG, pModule);
+        }
+    }
+
+    return FALSE;
+}
+
+BOOL IsValueType(
+    mdToken tk,
+    Module *pModule,
+    BOOL bIsParent)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(pModule != NULL);
+        PRECONDITION(
+            TypeFromToken(tk) == mdtTypeDef ||
+            TypeFromToken(tk) == mdtTypeRef ||
+            TypeFromToken(tk) == mdtTypeSpec
+        );
+    }
+    CONTRACTL_END
+
+    if (TypeFromToken(tk) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(pModule, tk, &pModule, &tk));
+
+    if (TypeFromToken(tk) == mdtTypeDef) {
+
+        if (IsMscorlibType(tk, pModule, g_pEnumClass))
+            return TRUE;
+
+        if (IsMscorlibType(tk, pModule, g_pValueTypeClass))
+            return TRUE;
+    }
+
+    if (TypeFromToken(tk) == mdtTypeSpec) {
+        ULONG cSig;
+        PCCOR_SIGNATURE pSig;
+        IMDInternalImport* pMdImport = pModule->GetMDImport();
+        IfFailThrow(pMdImport->GetTypeSpecFromToken(tk, &pSig, &cSig));
+
+        return IsValueType(pSig, pSig + cSig, pModule);
+    }
+
+    if (bIsParent == TRUE)
+        return FALSE;
+
+    if (GetParentType(tk, pModule, &tk, &pModule) == FALSE)
+        return FALSE;
+
+    return IsValueType(tk, pModule, TRUE);
+}
+
+void CreateInterfaceOrParentTypeSignature(
+    mdToken tk,
+    Module *pModule,
+    SigBuilder *pSigBuilder)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(pModule != NULL);
+        PRECONDITION(
+            TypeFromToken(tk) == mdtTypeDef ||
+            TypeFromToken(tk) == mdtTypeSpec
+        );
+    }
+    CONTRACTL_END
+
+    if (TypeFromToken(tk) == mdtTypeSpec)
+    {
+        ULONG cSig;
+        PCCOR_SIGNATURE pSig;
+        IMDInternalImport* pMdImport = pModule->GetMDImport();
+        IfFailThrow(pMdImport->GetTypeSpecFromToken(tk, &pSig, &cSig));
+        pSigBuilder->AppendBlob((PVOID)pSig, cSig);
+        return;
+    }
+
+    // precludes ELEMENT_TYPE_VALUETYPE, BOOLEAN, CHAR, I, U, I*, U*, and R*
+    CONSISTENCY_CHECK(!IsValueType(tk, pModule));
+
+    // precludes ELEMENT_TYPE_STRING
+    CONSISTENCY_CHECK(!IsMscorlibType(tk, pModule, g_pStringClass));
+
+    if (IsMscorlibType(tk, pModule, g_pObjectClass))
+    {
+        pSigBuilder->AppendElementType(ELEMENT_TYPE_OBJECT);
+        return;
+    }
+
+    pSigBuilder->AppendElementType(ELEMENT_TYPE_CLASS);
+    pSigBuilder->AppendToken(tk);
+}
+
+BOOL CompareInterfaceOrParentTypeForVariance(
+    mdToken tk1,
+    mdToken tk2,
+    Module *pModule1,
+    Module *pModule2,
+    TokenPairList *pVisited)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(pModule1 != NULL);
+        PRECONDITION(pModule2 != NULL);
+        PRECONDITION(TypeFromToken(tk1) == mdtTypeDef);
+        PRECONDITION(
+            TypeFromToken(tk2) == mdtTypeDef ||
+            TypeFromToken(tk2) == mdtTypeRef ||
+            TypeFromToken(tk2) == mdtTypeSpec
+        );
+    }
+    CONTRACTL_END
+
+    // restore MetaSig::CompareElementType "frame"
+    PCCOR_SIGNATURE pSig1 = NULL;
+    PCCOR_SIGNATURE pEndSig1 = NULL;
+    const Substitution* pSubst1 = NULL;
+    const Substitution* pSubst2 = NULL;
+    TokenPairList::Deconstruct(pVisited, &pSig1, &pEndSig1, &pSubst1, &pSubst2);
+
+    // no existing frame; let this be the first frame
+    SigBuilder sig1Builder;
+    if (pSig1 == NULL) 
+    {
+        DWORD cSig1;
+        pSig1 = (PCCOR_SIGNATURE)sig1Builder.GetSignature(&cSig1);
+        pEndSig1 = pSig1 + cSig1;
+    }
+
+    if (TypeFromToken(tk2) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(pModule2, tk2, &pModule2, &tk2));
+
+    // encode tk2 as a signature; MetaSig::CompareElementType requires tk2 be passed as a signature
+    SigBuilder sig2Builder;
+    CreateInterfaceOrParentTypeSignature(tk2, pModule2, &sig2Builder);
+
+    DWORD cSig2;
+    PCCOR_SIGNATURE pSig2 = (PCCOR_SIGNATURE)sig2Builder.GetSignature(&cSig2);
+    PCCOR_SIGNATURE pEndSig2 = pSig2 + cSig2;
+
+    // retry with new tk2/pModule2
+    return MetaSig::CompareElementType(
+        pSig1, pSig2,
+        pEndSig1, pEndSig2,
+        pModule1, pModule2,
+        pSubst1, pSubst2,
+        pVisited);
+}
+
+BOOL CompareTypeDefsOrRefsForVariance(
+    mdToken tk1,
+    mdToken tk2,
+    Module *pModule1,
+    Module *pModule2,
+    TokenPairList *pVisited)
+{
+#ifdef DACCESS_COMPILE
+    // We shouldn't execute this code in dac builds.
+    _ASSERTE(FALSE);
+#endif
+
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
+        MODE_ANY;
+        PRECONDITION(TypeFromToken(tk1) == mdtTypeDef);
+        PRECONDITION(
+            TypeFromToken(tk2) == mdtTypeDef ||
+            TypeFromToken(tk2) == mdtTypeRef
+        );
+    }
+    CONTRACTL_END
+
+    if (TypeFromToken(tk2) == mdtTypeRef)
+        IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(pModule2, tk2, &pModule2, &tk2));
+
+    if (tk1 == tk2 && pModule1 == pModule2)
+        return TRUE;
+
+    if (!TokenPairList::InVariantScope(pVisited))
+        return FALSE;
+
+    IMDInternalImport* pMdImport = pModule2->GetMDImport();
+
+    // compare base type
+    mdToken tkParent;
+    Module* pParentModule;
+    if (GetParentType(tk2, pModule2, &tkParent, &pParentModule))
+    {
+        if (TypeFromToken(tk2) == mdtTypeRef)
+            IfFailThrow(ClassLoader::ResolveTokenToTypeDefThrowing(pParentModule, tkParent, &pParentModule, &tkParent));
+
+        if (IsValueType(tkParent, pParentModule, TRUE))
+            return FALSE;
+
+        if (CompareInterfaceOrParentTypeForVariance(tk1, tkParent, pModule1, pParentModule, pVisited))
+            return TRUE;
+    }
+
+    // compare interfaces
+    mdInterfaceImpl tkInerfaceImpl;
+    HENUMInternalHolder hEnumInterfaceImpl(pMdImport);
+    hEnumInterfaceImpl.EnumInit(mdtInterfaceImpl, tk2);
+    while (pMdImport->EnumNext(&hEnumInterfaceImpl, &tkInerfaceImpl))
+    {
+        mdTypeRef tkInterface;
+        IfFailThrow(pMdImport->GetTypeOfInterfaceImpl(tkInerfaceImpl, &tkInterface));
+        if (CompareInterfaceOrParentTypeForVariance(tk1, tkInterface, pModule1, pModule2, pVisited))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+BOOL CompareTypeTokens(
+    mdToken tk1,
+    mdToken tk2,
+    Module *pModule1,
+    Module *pModule2,
+    TokenPairList *pVisited /*= NULL*/)
 {
     CONTRACTL
     {
@@ -3501,8 +3855,12 @@ BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModu
             // equivalent types (equivalence based on GUID and TypeIdentifierAttribute)
             return CompareTypeDefsForEquivalence(tk1, tk2, pModule1, pModule2, pVisited);
 #else // FEATURE_TYPEEQUIVALENCE
-            // two type defs can't be the same unless they are identical
-            return FALSE;
+            // two type defs can't be the same unless they are identical, but they might be variants
+            return CompareTypeDefsOrRefsForVariance(
+                tk1, tk2,
+                pModule1, pModule2,
+                pVisited
+            );
 #endif // FEATURE_TYPEEQUIVALENCE
         }
         IfFailGo(pInternalImport1->GetNameOfTypeDef(tk1, &pszName1, &pszNamespace1));
@@ -3532,69 +3890,6 @@ BOOL CompareTypeTokens(mdToken tk1, mdToken tk2, Module *pModule1, Module *pModu
     {
         return FALSE;
     }
-    
-    //////////////////////////////////////////////////////////////////////
-    // OK names pass, see if it is nested, and if so that the nested classes are the same
-    
-    enclosingTypeTk1 = mdTokenNil;
-    if (TypeFromToken(tk1) == mdtTypeRef)
-    {
-        IfFailGo(pInternalImport1->GetResolutionScopeOfTypeRef(tk1, &enclosingTypeTk1));
-        if (enclosingTypeTk1 == mdTypeRefNil)
-        {
-            enclosingTypeTk1 = mdTokenNil;
-        }
-    }
-    else
-    {
-        if (FAILED(hr = pInternalImport1->GetNestedClassProps(tk1, &enclosingTypeTk1)))
-        {
-            if (hr != CLDB_E_RECORD_NOTFOUND)
-            {
-                IfFailGo(hr);
-            }
-            enclosingTypeTk1 = mdTokenNil;
-        }
-    }
-    
-    enclosingTypeTk2 = mdTokenNil;
-    if (TypeFromToken(tk2) == mdtTypeRef)
-    {
-        IfFailGo(pInternalImport2->GetResolutionScopeOfTypeRef(tk2, &enclosingTypeTk2));
-        if (enclosingTypeTk2 == mdTypeRefNil)
-        {
-            enclosingTypeTk2 = mdTokenNil;
-        }
-    }
-    else
-    {
-        if (FAILED(hr = pInternalImport2->GetNestedClassProps(tk2, &enclosingTypeTk2)))
-        {
-            if (hr != CLDB_E_RECORD_NOTFOUND)
-            {
-                IfFailGo(hr);
-            }
-            enclosingTypeTk2 = mdTokenNil;
-        }
-    }
-    
-    if (TypeFromToken(enclosingTypeTk1) == mdtTypeRef || TypeFromToken(enclosingTypeTk1) == mdtTypeDef)
-    {
-        if (!CompareTypeTokens(enclosingTypeTk1, enclosingTypeTk2, pModule1, pModule2, pVisited))
-            return FALSE;
-
-        // TODO: We could return TRUE if we knew that type equivalence was not exercised during the previous call.
-    }
-    else
-    {
-        // Check if tk1 is non-nested, but tk2 is nested
-        if (TypeFromToken(enclosingTypeTk2) == mdtTypeRef || TypeFromToken(enclosingTypeTk2) == mdtTypeDef)
-            return FALSE;
-    }
-    
-    //////////////////////////////////////////////////////////////////////
-    // OK, we have non-nested types or the the enclosing types are equivalent
-
     
     // Do not load the type! (Or else you may run into circular dependency loading problems.)
     Module* pFoundModule1;
@@ -3634,6 +3929,179 @@ ErrExit:
 #pragma warning(push)
 #pragma warning(disable:21000) // Suppress PREFast warning about overly large function
 #endif
+
+void 
+ConsumeSignatureArgument(
+    PCCOR_SIGNATURE &pSig,
+    PCCOR_SIGNATURE pEndSig,
+    Module *pModule,
+    CorElementType type = ELEMENT_TYPE_MAX)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        MODE_ANY;
+    }
+    CONTRACTL_END
+
+    if (pSig >= pEndSig)
+        return;
+
+    if (type == ELEMENT_TYPE_MAX)
+        IfFailThrow(CorSigUncompressElementType_EndPtr(pSig, pEndSig, &type));
+
+    switch (type)
+    {
+        default:
+        {
+            THROW_BAD_FORMAT(BFA_BAD_COMPLUS_SIG, pModule);
+        }
+
+        case ELEMENT_TYPE_U:
+        case ELEMENT_TYPE_I:
+        case ELEMENT_TYPE_VOID:
+        case ELEMENT_TYPE_I1:
+        case ELEMENT_TYPE_U1:
+        case ELEMENT_TYPE_I2:
+        case ELEMENT_TYPE_U2:
+        case ELEMENT_TYPE_I4:
+        case ELEMENT_TYPE_U4:
+        case ELEMENT_TYPE_I8:
+        case ELEMENT_TYPE_U8:
+        case ELEMENT_TYPE_R4:
+        case ELEMENT_TYPE_R8:
+        case ELEMENT_TYPE_BOOLEAN:
+        case ELEMENT_TYPE_CHAR:
+        case ELEMENT_TYPE_TYPEDBYREF:
+        case ELEMENT_TYPE_STRING:
+        case ELEMENT_TYPE_OBJECT:
+        {
+            return;
+        }
+
+        case ELEMENT_TYPE_VAR:
+        case ELEMENT_TYPE_MVAR:
+        {
+            DWORD varNum;
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &varNum));
+            return;
+        }
+        
+        case ELEMENT_TYPE_CMOD_REQD:
+        case ELEMENT_TYPE_CMOD_OPT:
+        {
+            mdToken tk;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig, pEndSig, &tk));
+            ConsumeSignatureArgument(pSig, pEndSig, pModule);
+            return;
+        }
+
+        case ELEMENT_TYPE_SZARRAY:
+        case ELEMENT_TYPE_PTR:
+        case ELEMENT_TYPE_BYREF:
+        {
+            ConsumeSignatureArgument(pSig, pEndSig, pModule);
+            return;
+        }
+
+        case ELEMENT_TYPE_VALUETYPE:
+        case ELEMENT_TYPE_CLASS:
+        {
+            mdToken tk;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig, pEndSig, &tk));
+            return;
+        }
+        
+        case ELEMENT_TYPE_FNPTR:
+        {
+            CorElementType callingConvention = ELEMENT_TYPE_MAX;
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig, pEndSig, &callingConvention));
+
+            DWORD argCnt;
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &argCnt));
+            
+            // include return parameter
+            while (argCnt-- >= 0)
+                ConsumeSignatureArgument(pSig, pEndSig, pModule);
+
+            return;
+        }
+        
+        case ELEMENT_TYPE_GENERICINST:
+        {
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig, pEndSig, &type));
+            
+            mdToken tk;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig, pEndSig, &tk));
+
+            DWORD argCnt;
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &argCnt));
+            
+            while (argCnt-- > 0)
+                ConsumeSignatureArgument(pSig, pEndSig, pModule);
+
+            return;
+        }
+        
+        case ELEMENT_TYPE_ARRAY:
+        {
+            // syntax: ARRAY <base type> rank <count n> <size 1> .... <size n> <lower bound m>
+            // <lb 1> .... <lb m>
+            DWORD rank;
+            DWORD dimension_sizes;
+            DWORD dimension_lowerb;
+            DWORD i;
+
+            // element type
+            ConsumeSignatureArgument(pSig, pEndSig, pModule);
+
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &rank));
+
+            // A zero ends the array spec
+            if (rank == 0)
+                return;
+
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &dimension_sizes));
+
+            for (i = 0; i < dimension_sizes; i++)
+            {
+                DWORD size;
+
+                if (pSig == pEndSig)
+                    return;
+
+                IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &size));
+            }
+
+            if (pSig == pEndSig)
+                return;
+
+            // # dimensions for lower bounds
+            IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &dimension_lowerb));
+
+            for (i = 0; i < dimension_lowerb; i++)
+            {
+                DWORD size;
+
+                if (pSig == pEndSig)
+                    return;
+
+                IfFailThrow(CorSigUncompressData_EndPtr(pSig, pEndSig, &size));
+            }
+
+            return;
+        }
+        
+        case ELEMENT_TYPE_INTERNAL:
+        {
+            TypeHandle hType1;
+            IfFailThrow(CorSigUncompressPointer_EndPtr(pSig, pEndSig, (void **)&hType1));
+            return;
+        }
+    } // switch
+}
+
 //---------------------------------------------------------------------------------------
 // 
 // Compare the next elements in two sigs.
@@ -3659,6 +4127,14 @@ MetaSig::CompareElementType(
         MODE_ANY;
     }
     CONTRACTL_END
+
+    BOOL inVariantScope = TokenPairList::InVariantScope(pVisited);
+
+    // save frame for variant recursion
+    TokenPairList newFrameVisited = TokenPairList(pSig1, pEndSig1, pSubst1, pSubst2, pVisited);
+
+    // save orig pSig2 to allow using ConsumeSignatureArgument to advance to next argument
+    PCCOR_SIGNATURE pOrigSig2 = pSig2;
 
  redo:
     // We jump here if the Type was a ET_CMOD prefix.
@@ -3817,9 +4293,37 @@ MetaSig::CompareElementType(
                 }
             }
         }
-        else
+        else if (!TokenPairList::InVariantScope(pVisited))
         {
             return FALSE; // types must be the same
+        }
+
+        switch (Type2)
+        {
+        case ELEMENT_TYPE_STRING:
+        case ELEMENT_TYPE_ARRAY:
+        case ELEMENT_TYPE_SZARRAY:
+            return Type1 == ELEMENT_TYPE_OBJECT;
+
+        case ELEMENT_TYPE_GENERICINST:
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig2, pEndSig2, &Type2));
+            if (Type1 != ELEMENT_TYPE_VALUETYPE && Type1 != ELEMENT_TYPE_CLASS)
+            {
+                return FALSE;
+            }
+            // fall through
+
+        case ELEMENT_TYPE_VALUETYPE:
+        case ELEMENT_TYPE_CLASS:
+            pVisited = &newFrameVisited;
+
+            // walk type hierarchy and interfaces of tk2 looking for a match
+            mdToken tk2;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+            return CompareTypeDefsOrRefsForVariance(mdTypeDefNil, tk2, pModule1, pModule2, pVisited);
+
+        default:
+            return FALSE;
         }
     }
 
@@ -3848,14 +4352,56 @@ MetaSig::CompareElementType(
         case ELEMENT_TYPE_CHAR:
         case ELEMENT_TYPE_TYPEDBYREF:
         case ELEMENT_TYPE_STRING:
+        {
+            return Type1 == Type2;
+        }
+
         case ELEMENT_TYPE_OBJECT:
         {
-            return TRUE;
+            if (Type1 == Type2)
+            {
+                return TRUE;
+            }
+
+            if (!inVariantScope)
+            {
+                return FALSE;
+            }
+
+            switch (Type2)
+            {
+                case ELEMENT_TYPE_STRING:
+                case ELEMENT_TYPE_ARRAY:
+                case ELEMENT_TYPE_SZARRAY:
+                case ELEMENT_TYPE_CLASS:
+                {
+                    return TRUE;
+                }
+
+                case ELEMENT_TYPE_GENERICINST:
+                {
+                    return IsValueType(pSig2, pEndSig2, pModule2, ELEMENT_TYPE_GENERICINST) == FALSE;
+                }
+
+                case ELEMENT_TYPE_VAR:
+                case ELEMENT_TYPE_MVAR:
+                {
+                    return FALSE; // TODO: check constraints
+                }
+
+                default:
+                {
+                    return FALSE;
+                }
+            }
         }
 
         case ELEMENT_TYPE_VAR:
         case ELEMENT_TYPE_MVAR:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
             DWORD varNum1;
             IfFailThrow(CorSigUncompressData_EndPtr(pSig1, pEndSig1, &varNum1));
             DWORD varNum2;
@@ -3867,6 +4413,9 @@ MetaSig::CompareElementType(
         case ELEMENT_TYPE_CMOD_REQD:
         case ELEMENT_TYPE_CMOD_OPT:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
             mdToken tk1, tk2;
 
             IfFailThrow(CorSigUncompressToken_EndPtr(pSig1, pEndSig1, &tk1));
@@ -3891,10 +4440,18 @@ MetaSig::CompareElementType(
 
         // These take an additional argument, which is the element type
         case ELEMENT_TYPE_SZARRAY:
+        {
+            // TODO: Make non-variant scope
+        } // fall through to ELEMENT_TYPE_PTR
+
         case ELEMENT_TYPE_PTR:
         case ELEMENT_TYPE_BYREF:
         {
-            if (!CompareElementType(
+            if (Type1 != Type2)
+                return FALSE;
+
+            TokenPairList nonVariantVisited = TokenPairList::AdjustForNonVariantScope(pVisited);
+            return CompareElementType(
                     pSig1, 
                     pSig2, 
                     pEndSig1, 
@@ -3903,11 +4460,7 @@ MetaSig::CompareElementType(
                     pModule2, 
                     pSubst1, 
                     pSubst2, 
-                    pVisited))
-            {
-                return FALSE;
-            }
-            return TRUE;
+                    &nonVariantVisited);
         }
 
         case ELEMENT_TYPE_VALUETYPE:
@@ -3916,13 +4469,70 @@ MetaSig::CompareElementType(
             mdToken tk1, tk2;
 
             IfFailThrow(CorSigUncompressToken_EndPtr(pSig1, pEndSig1, &tk1));
-            IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+
+            if (Type1 == Type2)
+            {
+                IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+            }
+            else if (Type1 == ELEMENT_TYPE_VALUETYPE)
+            {
+                return FALSE;
+            }
+            else 
+            {
+                if (!inVariantScope)
+                {
+                    return FALSE;
+                }
+
+                switch (Type2)
+                {
+                    case ELEMENT_TYPE_GENERICINST:
+                    {
+                        IfFailThrow(CorSigUncompressElementType_EndPtr(pSig2, pEndSig2, &Type2));
+                        if (Type2 != ELEMENT_TYPE_CLASS)
+                        {
+                            return FALSE;
+                        }
+
+                        mdToken tk1;
+                        IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+
+                        // consume remaining instantiation signature information
+                        ConsumeSignatureArgument(pSig2 = pOrigSig2, pEndSig2, pModule2);
+
+                        // find a parent which is also not a generic instantiation
+                        do
+                        {
+                            if (GetParentType(tk2, pModule2, &tk2, &pModule2) == FALSE)
+                                return FALSE;
+                        }
+                        while (TypeFromToken(tk2) == mdtTypeSpec);
+
+                        break;
+                    }
+
+                    case ELEMENT_TYPE_VAR:
+                    case ELEMENT_TYPE_MVAR:
+                    {
+                        return FALSE; // TODO: check constraints
+                    }
+
+                    default:
+                    {
+                        return FALSE;
+                    }
+                }
+            }
             
-            return CompareTypeTokens(tk1, tk2, pModule1, pModule2, pVisited);
+            return CompareTypeTokens(tk1, tk2, pModule1, pModule2, &newFrameVisited);
         }
         
         case ELEMENT_TYPE_FNPTR:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
             // Compare calling conventions
             // Note: We used to read them as compressed integers, which is wrong, but works for correct 
             // signatures as the highest bit is always 0 for calling conventions
@@ -3973,6 +4583,11 @@ MetaSig::CompareElementType(
         
         case ELEMENT_TYPE_GENERICINST:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
+            pVisited = &newFrameVisited;
+
             TokenPairList newVisited = TokenPairList::AdjustForTypeSpec(
                 pVisited, 
                 pModule1, 
@@ -3981,20 +4596,23 @@ MetaSig::CompareElementType(
             TokenPairList newVisitedAlwaysForbidden = TokenPairList::AdjustForTypeEquivalenceForbiddenScope(pVisited);
 
             // Type constructors - The actual type is never permitted to participate in type equivalence.
-            if (!CompareElementType(
-                    pSig1, 
-                    pSig2, 
-                    pEndSig1, 
-                    pEndSig2, 
-                    pModule1, 
-                    pModule2, 
-                    pSubst1, 
-                    pSubst2, 
-                    &newVisitedAlwaysForbidden))
+
+            // ELEMENT_TYPE_GENERICINST must be followed by either ELEMENT_TYPE_CLASS or ELEMENT_TYPE_VALUETYPE
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig1, pEndSig1, &Type1));
+            IfFailThrow(CorSigUncompressElementType_EndPtr(pSig2, pEndSig2, &Type2));
+            if ((Type1 != Type2) || (Type1 != ELEMENT_TYPE_CLASS && Type1 != ELEMENT_TYPE_VALUETYPE))
             {
                 return FALSE;
             }
             
+            mdToken tk1, tk2;
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig1, pEndSig1, &tk1));
+            IfFailThrow(CorSigUncompressToken_EndPtr(pSig2, pEndSig2, &tk2));
+            if (!CompareTypeTokens(tk1, tk2, pModule1, pModule2, pVisited))
+            {
+                return FALSE;
+            }
+
             DWORD argCnt1;
             IfFailThrow(CorSigUncompressData_EndPtr(pSig1, pEndSig1, &argCnt1));
             DWORD argCnt2;
@@ -4026,6 +4644,9 @@ MetaSig::CompareElementType(
         
         case ELEMENT_TYPE_ARRAY:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
             // syntax: ARRAY <base type> rank <count n> <size 1> .... <size n> <lower bound m>
             // <lb 1> .... <lb m>
             DWORD rank1, rank2;
@@ -4118,6 +4739,9 @@ MetaSig::CompareElementType(
         
         case ELEMENT_TYPE_INTERNAL:
         {
+            if (Type1 != Type2)
+                return FALSE;
+
             TypeHandle hType1, hType2;
 
             IfFailThrow(CorSigUncompressPointer_EndPtr(pSig1, pEndSig1, (void **)&hType1));
@@ -4446,22 +5070,47 @@ MetaSig::CompareMethodSigs(
         return TRUE;
     }
 
-    // do return type as well
-    for (i = 0; i <= ArgCount1; i++)
+    // if variant impl/decl check, then pSig1 is the decl and pSig2 the impl
+    // so a good match could be:
+    //  decl = pSig1 = 'object M(string a)'
+    //  impl = pSig2 = 'string M(object a)'
+
+    // check return type
+    // if variant, then ret type of pSig2 is ok so long as 
+    // it's assignable to ret type of pSig1
+    if (!CompareElementType(
+        pSig1, 
+        pSig2,
+        pEndSig1, 
+        pEndSig2,
+        pModule1, 
+        pModule2,
+        pSubst1, 
+        pSubst2,
+        pVisited))
+    {
+        return FALSE;
+    }
+
+    // check argument types
+    // if variant, then argument of pSig1 is ok so long as 
+    // it's assignable to its corrisponding argument in pSig2
+    for (i = 1; i <= ArgCount1; i++)
     {
         if (!CompareElementType(
-                pSig1, 
-                pSig2, 
-                pEndSig1, 
-                pEndSig2, 
-                pModule1, 
-                pModule2, 
-                pSubst1, 
-                pSubst2, 
-                pVisited))
+            pSig2, 
+            pSig1,
+            pEndSig2, 
+            pEndSig1,
+            pModule2, 
+            pModule1,
+            pSubst2, 
+            pSubst1,
+            pVisited))
         {
             return FALSE;
         }
+
     }
 
     return TRUE;
@@ -4791,7 +5440,8 @@ BOOL MetaSig::CompareVariableConstraints(const Substitution *pSubst1,
     HENUMInternalHolder hEnum1(pInternalImport1);
     mdGenericParamConstraint tkConstraint1;
     hEnum1.EnumInit(mdtGenericParamConstraint, tok1);
-    
+    TokenPairList newVisited = TokenPairList::AdjustForVariantScope(NULL);
+
     while (pInternalImport1->EnumNext(&hEnum1, &tkConstraint1))
     {
         mdToken tkConstraintType1, tkParam1;
@@ -4821,8 +5471,8 @@ BOOL MetaSig::CompareVariableConstraints(const Substitution *pSubst1,
                 mdToken tkConstraintType2, tkParam2;
                 IfFailThrow(pInternalImport2->GetGenericParamConstraintProps(tkConstraint2, &tkParam2, &tkConstraintType2));
                 _ASSERTE(tkParam2 == tok2);
-            
-                found = CompareTypeDefOrRefOrSpec(pModule1, tkConstraintType1, pSubst1, pModule2, tkConstraintType2, pSubst2, NULL);
+
+                found = CompareTypeDefOrRefOrSpec(pModule1, tkConstraintType1, pSubst1, pModule2, tkConstraintType2, pSubst2, &newVisited);
             }
             if (!found) 
             {
@@ -5504,6 +6154,48 @@ TokenPairList TokenPairList::AdjustForTypeEquivalenceForbiddenScope(TokenPairLis
 
     TokenPairList result(pTemplate);
     result.m_bInTypeEquivalenceForbiddenScope = TRUE;
+    return result;
+}
+
+// static
+TokenPairList TokenPairList::AdjustForVariantScope(TokenPairList *pTemplate)
+{
+    CONTRACTL
+    {
+        THROWS;
+        MODE_ANY;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END
+
+    if (pTemplate)
+    {
+        assert(!pTemplate->m_bInVariantScope);
+    }
+
+    TokenPairList result(pTemplate);
+    result.m_bInVariantScope = TRUE;
+    return result;
+}
+
+// static
+TokenPairList TokenPairList::AdjustForNonVariantScope(TokenPairList *pTemplate)
+{
+    CONTRACTL
+    {
+        THROWS;
+        MODE_ANY;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END
+
+    if (pTemplate && pTemplate->m_bInVariantScope == FALSE)
+    {
+        return *pTemplate;
+    }
+
+    TokenPairList result(pTemplate);
+    result.m_bInVariantScope = FALSE;
     return result;
 }
 
