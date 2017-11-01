@@ -803,6 +803,13 @@ private:
             const MethodSignature & sig2);
 
         //-----------------------------------------------------------------------------------------
+        // Returns true if sig1 can safely call sig2 and return return sig2's result. (Type equivalence permitted)
+        static bool
+        SignaturesVariant(
+            const MethodSignature & sig1,
+            const MethodSignature & sig2);
+
+        //-----------------------------------------------------------------------------------------
         // Returns true if the metadata signatures (PCCOR_SIGNATURE) are equivalent. (Type equivalence permitted)
         static bool
         SignaturesEquivalent(
