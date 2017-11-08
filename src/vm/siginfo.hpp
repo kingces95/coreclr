@@ -403,6 +403,16 @@ private:
     Module *             m_pModule; // Module in which instantiation lives (needed to resolve typerefs)
     SigPointer           m_sigInst;
     const Substitution * m_pNext;
+    CorElementType       m_type;
+    mdToken              m_token;
+    ULONG                m_typeParameterCount;
+
+private:
+    void Initialize(
+        PCCOR_SIGNATURE      pSig,
+        ULONG                cSig,
+        Module *             pModuleArg,
+        const Substitution * nextArg);
 
 public:
     Substitution()
@@ -410,12 +420,16 @@ public:
         LIMITED_METHOD_CONTRACT;
         m_pModule = NULL; 
         m_pNext = NULL;
+        m_type = ELEMENT_TYPE_END;
+        m_token = mdTokenNil;
+        m_typeParameterCount = 0;
     }
     
     Substitution(
         Module *             pModuleArg, 
         const SigPointer &   sigInst, 
-        const Substitution * pNextSubstitution)
+        const Substitution * pNextSubstitution) 
+        : Substitution()
     { 
         LIMITED_METHOD_CONTRACT;
         m_pModule = pModuleArg; 
@@ -427,8 +441,15 @@ public:
         mdToken              parentTypeDefOrRefOrSpec, 
         Module *             pModuleArg, 
         const Substitution * nextArg);
+
+    Substitution(
+        PCCOR_SIGNATURE      pSig,
+        PCCOR_SIGNATURE      pEndSig,
+        Module *             pModuleArg,
+        const Substitution * nextArg = NULL);
     
     Substitution(const Substitution & subst)
+        : Substitution()
     { 
         LIMITED_METHOD_CONTRACT;
         m_pModule = subst.m_pModule; 
@@ -440,6 +461,9 @@ public:
     Module * GetModule() const { LIMITED_METHOD_DAC_CONTRACT; return m_pModule; }
     const Substitution * GetNext() const { LIMITED_METHOD_DAC_CONTRACT; return m_pNext; }
     const SigPointer & GetInst() const { LIMITED_METHOD_DAC_CONTRACT; return m_sigInst; }
+    CorElementType GetType() const { LIMITED_METHOD_DAC_CONTRACT; return m_type; }
+    mdToken GetToken() const { LIMITED_METHOD_DAC_CONTRACT; return m_token; }
+    ULONG GetSubsitutionCount() const { LIMITED_METHOD_DAC_CONTRACT; return m_typeParameterCount; }
     DWORD GetLength() const;
     
     void CopyToArray(Substitution * pTarget /* must have type Substitution[GetLength()] */ ) const;
