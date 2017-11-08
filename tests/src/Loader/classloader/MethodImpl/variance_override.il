@@ -24,6 +24,9 @@
 .class public abstract XA { }
 .class public abstract XB`1<T> extends XA { }
 .class public abstract XC extends class XB`1<class C> { }
+.class interface public abstract IXA { }
+.class interface public abstract IXB`1<T> implements class IXA { }
+.class interface public abstract IXC implements class IXB`1<class C> { }
 
 // class hierarchy nested
 .class public NA { }
@@ -39,6 +42,11 @@
 .class interface public abstract IA`1<T> { }
 .class interface public abstract IB`1<T> implements class IA`1<!T> { }
 .class interface public abstract IC`1<T> implements class IB`1<!T> { }
+
+// generic covariant interface hierarchy
+.class interface public abstract ICoA`1<+T> { }
+.class interface public abstract ICoB`1<+T> implements class ICoA`1<!T> { }
+.class interface public abstract ICoC`1<+T> implements class ICoB`1<!T> { }
 
 .class public value sealed StructIA implements IA { }
 
@@ -227,6 +235,15 @@
 .class public abstract CovariantMixedC extends CovariantMixedB {
   .method public abstract virtual class XC M() { .override method instance class XB`1<class C> class .base::M() }
 }
+.class public abstract CovariantMixedIA {
+  .method public abstract virtual class IXA M() { }
+}
+.class public abstract CovariantMixedIB extends CovariantMixedIA {
+  .method public abstract virtual class IXB`1<class C> M() { .override method instance class IXA class .base::M() }
+}
+.class public abstract CovariantMixedIC extends CovariantMixedIB {
+  .method public abstract virtual class IXC M() { .override method instance class IXB`1<class C> class .base::M() }
+}
 
 // covariant derived interface
 .class public abstract CovariantIA {
@@ -263,6 +280,17 @@
 }
 .class public abstract CovariantIACB`1<T> extends class CovariantIAC`1<!T> {
   .method public abstract virtual class IB`1<!T> M() { .override method instance class IA`1<!T> class CovariantIA`1<!T>::M() }
+}
+
+// covariant derived generic covariant interface
+.class public abstract CovariantICoAofA {
+  .method public abstract virtual class ICoA`1<class A> M() { }
+}
+.class public abstract CovariantICoAofB extends CovariantICoAofA {
+  .method public abstract virtual class ICoA`1<class B> M() { .override method instance class ICoA`1<class A> class .base::M() }
+}
+.class public abstract CovariantICoBofB extends CovariantICoAofA {
+  .method public abstract virtual class ICoB`1<class B> M() { .override method instance class ICoA`1<class A> class .base::M() }
 }
 
 // contravariant
@@ -319,11 +347,26 @@
   .method public abstract virtual void M(class StructIA) { .override method instance void class .base::M(class IA) }
 }
 
+// chain
+.class public abstract TA`1<T> {
+  .method public abstract virtual !T M() { }
+}
+.class public abstract TA0`1<T, V> extends class TA`1<!T> { }
+.class public abstract TA1`1<T, V> extends class TA0`1<!V, !T> { }
+.class public abstract TA2`1<T, V> extends class TA1`1<!T, !V> { }
+.class public abstract TAN`1<T, V> extends class TA2`1<!T, !V> {
+  .method public abstract virtual !T M() { .override method instance !T class TA`1<!V>::M() }
+}
+
 .class private abstract sealed beforefieldinit Program {
   .method private static int32 Run() {
     .entrypoint
 
-    //ldstr "CovariantIACB" call void Program::Load(string) br EXIT
+    //ldstr "CovariantMixedB" call void Program::Load(string) br EXIT
+    ldstr "CovariantMixedIB" call void Program::Load(string) br EXIT
+    ldstr "CovariantICoBofB" call void Program::Load(string) br EXIT
+    ldstr "TAN`1" call void Program::Load(string) br EXIT
+    ldstr "CovariantIABC" call void Program::Load(string) br EXIT
 
     call       void Program::Covariant()
     call       void Program::Contravariant()
