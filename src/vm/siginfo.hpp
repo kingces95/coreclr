@@ -403,6 +403,16 @@ private:
     Module *             m_pModule; // Module in which instantiation lives (needed to resolve typerefs)
     SigPointer           m_sigInst;
     const Substitution * m_pNext;
+    CorElementType       m_type;
+    mdToken              m_token;
+    ULONG                m_typeParameterCount;
+
+private:
+    void Initialize(
+        PCCOR_SIGNATURE      pSig,
+        ULONG                cSig,
+        Module *             pModuleArg,
+        const Substitution * nextArg);
 
 public:
     Substitution()
@@ -410,12 +420,16 @@ public:
         LIMITED_METHOD_CONTRACT;
         m_pModule = NULL; 
         m_pNext = NULL;
+        m_type = ELEMENT_TYPE_END;
+        m_token = mdTokenNil;
+        m_typeParameterCount = 0;
     }
     
     Substitution(
         Module *             pModuleArg, 
         const SigPointer &   sigInst, 
-        const Substitution * pNextSubstitution)
+        const Substitution * pNextSubstitution) 
+        : Substitution()
     { 
         LIMITED_METHOD_CONTRACT;
         m_pModule = pModuleArg; 
@@ -427,8 +441,15 @@ public:
         mdToken              parentTypeDefOrRefOrSpec, 
         Module *             pModuleArg, 
         const Substitution * nextArg);
+
+    Substitution(
+        PCCOR_SIGNATURE      pSig,
+        PCCOR_SIGNATURE      pEndSig,
+        Module *             pModuleArg,
+        const Substitution * nextArg = NULL);
     
     Substitution(const Substitution & subst)
+        : Substitution()
     { 
         LIMITED_METHOD_CONTRACT;
         m_pModule = subst.m_pModule; 
@@ -440,6 +461,9 @@ public:
     Module * GetModule() const { LIMITED_METHOD_DAC_CONTRACT; return m_pModule; }
     const Substitution * GetNext() const { LIMITED_METHOD_DAC_CONTRACT; return m_pNext; }
     const SigPointer & GetInst() const { LIMITED_METHOD_DAC_CONTRACT; return m_sigInst; }
+    CorElementType GetType() const { LIMITED_METHOD_DAC_CONTRACT; return m_type; }
+    mdToken GetToken() const { LIMITED_METHOD_DAC_CONTRACT; return m_token; }
+    ULONG GetSubsitutionCount() const { LIMITED_METHOD_DAC_CONTRACT; return m_typeParameterCount; }
     DWORD GetLength() const;
     
     void CopyToArray(Substitution * pTarget /* must have type Substitution[GetLength()] */ ) const;
@@ -457,11 +481,31 @@ class TokenPairList
 public:
     // Chain using this constructor when comparing two typedefs for equivalence.
     TokenPairList(mdToken token1, Module *pModule1, mdToken token2, Module *pModule2, TokenPairList *pNext)
-        : m_token1(token1), m_token2(token2),
-          m_pModule1(pModule1), m_pModule2(pModule2),
-          m_bInTypeEquivalenceForbiddenScope(pNext == NULL ? FALSE : pNext->m_bInTypeEquivalenceForbiddenScope),
-          m_pNext(pNext)
-    { LIMITED_METHOD_CONTRACT; }
+        : TokenPairList(pNext)
+    {
+        LIMITED_METHOD_CONTRACT;
+
+        m_token1 = token1;
+        m_token2 = token2;
+        m_pModule1 = pModule1;
+        m_pModule2 = pModule2;
+    }
+
+    TokenPairList(
+        PCCOR_SIGNATURE pSig1,
+        PCCOR_SIGNATURE pEndSig1,
+        const Substitution* pSubst1,
+        const Substitution* pSubst2,
+        TokenPairList *pNext)
+        : TokenPairList(pNext)
+    {
+        LIMITED_METHOD_CONTRACT;
+
+        m_pSig1 = pSig1;
+        m_pEndSig1 = pEndSig1;
+        m_pSubst1 = pSubst1;
+        m_pSubst2 = pSubst2;
+    }
 
     static BOOL Exists(TokenPairList *pList, mdToken token1, Module *pModule1, mdToken token2, Module *pModule2)
     {
@@ -485,10 +529,37 @@ public:
     {
         return (pList == NULL ? FALSE : pList->m_bInTypeEquivalenceForbiddenScope);
     }
+    static BOOL InVariantScope(TokenPairList *pList)
+    {
+        return (pList == NULL ? FALSE : pList->m_bInVariantScope);
+    }
 
     // Chain using this method when comparing type specs.
     static TokenPairList AdjustForTypeSpec(TokenPairList *pTemplate, Module *pTypeSpecModule, PCCOR_SIGNATURE pTypeSpecSig, DWORD cbTypeSpecSig);
     static TokenPairList AdjustForTypeEquivalenceForbiddenScope(TokenPairList *pTemplate);
+    static TokenPairList AdjustForVariantScope(TokenPairList *pTemplate);
+    static TokenPairList AdjustForNonVariantScope(TokenPairList *pTemplate);
+
+    static void Deconstruct(
+        TokenPairList *pList,
+        PCCOR_SIGNATURE* ppSig1,
+        PCCOR_SIGNATURE* ppEndSig1,
+        const Substitution** ppSubst1,
+        const Substitution** ppSubst2)
+    {
+        *ppSig1 = NULL;
+        *ppEndSig1 = NULL;
+        *ppSubst1 = NULL;
+        *ppSubst2 = NULL;
+
+        if (!pList)
+            return;
+
+        *ppSig1 = pList->m_pSig1;
+        *ppEndSig1 = pList->m_pEndSig1;
+        *ppSubst1 = pList->m_pSubst1;
+        *ppSubst2 = pList->m_pSubst2;
+    }
 
 private:
     TokenPairList(TokenPairList *pTemplate)
@@ -497,8 +568,19 @@ private:
           m_pModule1(pTemplate ? pTemplate->m_pModule1 : NULL),
           m_pModule2(pTemplate ? pTemplate->m_pModule2 : NULL),
           m_bInTypeEquivalenceForbiddenScope(pTemplate ? pTemplate->m_bInTypeEquivalenceForbiddenScope : FALSE),
+          m_bInVariantScope(pTemplate ? pTemplate->m_bInVariantScope : FALSE),
+          m_pSig1(pTemplate ? pTemplate->m_pSig1 : NULL),
+          m_pEndSig1(pTemplate ? pTemplate->m_pEndSig1 : NULL),
+          m_pSubst1(pTemplate ? pTemplate->m_pSubst1 : NULL),
+          m_pSubst2(pTemplate ? pTemplate->m_pSubst2 : NULL),
           m_pNext(pTemplate ? pTemplate->m_pNext : NULL)
     { LIMITED_METHOD_CONTRACT; }
+
+    BOOL m_bInVariantScope;
+    PCCOR_SIGNATURE m_pSig1;
+    PCCOR_SIGNATURE m_pEndSig1;
+    const Substitution* m_pSubst1;
+    const Substitution* m_pSubst2;
 
     mdToken m_token1, m_token2;
     Module *m_pModule1, *m_pModule2;
@@ -1070,20 +1152,6 @@ private:
                                               Module *pModule2, mdToken tok2,
                                               const Substitution *pSubst2,
                                               TokenPairList *pVisited);
-        static BOOL CompareTypeSpecToToken(mdTypeSpec tk1,
-                                           mdToken tk2,
-                                           Module *pModule1,
-                                           Module *pModule2,
-                                           const Substitution *pSubst1,
-                                           TokenPairList *pVisited);
-
-        static BOOL CompareElementTypeToToken(PCCOR_SIGNATURE &pSig1,
-                                             PCCOR_SIGNATURE pEndSig1, // end of sig1
-                                             mdToken         tk2,
-                                             Module*         pModule1,
-                                             Module*         pModule2,
-                                             const Substitution*   pSubst1,
-                                             TokenPairList *pVisited);
 
 public:
 
